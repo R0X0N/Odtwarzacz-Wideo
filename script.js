@@ -158,8 +158,25 @@ modalInput.onkeydown = (e) => {
 window.addEventListener('keydown', (e) => {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
     const key = e.key.toLowerCase();
+    
     if (key === 'i') setInPoint();
     if (key === 'o') setOutPoint();
+    
+    // Spacja -> Play/Pause
+    if (e.code === 'Space') {
+        e.preventDefault(); // Blokuje przewijanie strony w dół
+        togglePlay();
+    }
+    
+    // Strzałki do nawigacji po klatkach
+    if (e.code === 'ArrowLeft') {
+        e.preventDefault();
+        skipFrames(-1);
+    }
+    if (e.code === 'ArrowRight') {
+        e.preventDefault();
+        skipFrames(1);
+    }
 });
 
 // --- RYSOWANIE OSI CZASU ---
@@ -201,20 +218,16 @@ function drawTimeline() {
     const track_y = Math.floor(canvas.height / 2 - track_h / 2 + 5);
     const x_start = frameToX(trimStart), x_end = frameToX(trimEnd), x_curr = frameToX(currentFrame);
     
-    // Tło osi
     drawRoundedRect(ctx, margin, track_y, canvas.width - 2 * margin, track_h, 8, "#16181A");
     
-    // Zaznaczony zakres
     const width = Math.max(2, x_end - x_start);
     const rangeColor = editingRangeId ? "#FDD835" : "#2E7D32"; 
     drawRoundedRect(ctx, x_start, track_y, width, track_h, 8, rangeColor);
     
-    // Uchwyty
     const handle_w = 16;
     drawRoundedRect(ctx, x_start - handle_w / 2, track_y - 4, handle_w, track_h + 8, 6, "#8EB2D6");
     drawRoundedRect(ctx, x_end - handle_w / 2, track_y - 4, handle_w, track_h + 8, 6, "#8EB2D6");
     
-    // Playhead
     ctx.beginPath(); ctx.strokeStyle = "#E53935"; ctx.lineWidth = 2;
     ctx.moveTo(x_curr, track_y - 15); ctx.lineTo(x_curr, track_y + track_h + 15); ctx.stroke();
     ctx.beginPath(); ctx.fillStyle = "#E53935";
@@ -335,7 +348,6 @@ function editRange(id) {
     if (!r) return;
 
     editingRangeId = id;
-
     trimStart = r.start; 
     trimEnd = r.end; 
     currentFrame = r.start;
@@ -349,7 +361,6 @@ function editRange(id) {
 
 function cancelEdit() {
     editingRangeId = null;
-    
     actionRangeBtn.textContent = "Dodaj zakres ➕";
     actionRangeBtn.classList.remove("editing");
     if (cancelEditBtn) cancelEditBtn.style.display = "none";
@@ -385,7 +396,7 @@ function updateRangesList() {
     });
 }
 
-// --- GENEROWANIE PACZKI ---
+// --- GENEROWANIE PACZKI (ZOPTYMALIZOWANE) ---
 async function processVideo() {
     if (!video.src) return alert("Najpierw wgraj plik wideo!");
     if (selectedRanges.length === 0) return alert("Dodaj co najmniej jeden zakres!");
@@ -401,12 +412,23 @@ async function processVideo() {
     btn.disabled = true;
     btn.textContent = "Przygotowywanie...";
 
-    let totalFramesToExtract = 0;
-    selectedRanges.forEach(r => { totalFramesToExtract += Math.floor((r.end - r.start) / step) + 1; });
+    // --- KROK 1: DEDUPLIKACJA KLATEK ---
+    // Tworzymy mapę określającą, do których folderów ma trafić konkretna klatka
+    const frameMap = new Map();
+    selectedRanges.forEach(r => { 
+        for (let f = r.start; f <= r.end; f += step) {
+            if (!frameMap.has(f)) frameMap.set(f, []);
+            frameMap.get(f).push(r.name);
+        }
+    });
+
+    // Sortujemy klatki chronologicznie, żeby przesuwać wideo płynnie do przodu
+    const uniqueFrames = Array.from(frameMap.keys()).sort((a, b) => a - b);
+    const totalUniqueFrames = uniqueFrames.length;
 
     overlay.style.display = 'flex';
     percentText.textContent = "0%";
-    progressText.textContent = `0 / ${totalFramesToExtract} klatek`;
+    progressText.textContent = `0 / ${totalUniqueFrames} unikalnych klatek`;
     etaText.textContent = `Szacowany czas: --:--`;
 
     const zip = new JSZip();
@@ -432,49 +454,83 @@ async function processVideo() {
     offscreenCanvas.width = video.videoWidth; 
     offscreenCanvas.height = video.videoHeight;
 
+    // --- KROK 2: BEZPIECZNE PRZEWIJANIE (Nawet zminimalizowana przeglądarka) ---
     const seekVideo = (time) => {
         return new Promise(resolve => {
-            video.onseeked = () => resolve();
+            let resolved = false;
+            const onSeeked = () => {
+                if(resolved) return;
+                resolved = true;
+                video.removeEventListener('seeked', onSeeked);
+                resolve();
+            };
+            video.addEventListener('seeked', onSeeked);
             video.currentTime = time;
+
+            // Timeout w razie gdyby przeglądarka wstrzymała renderowanie z powodu minimalizacji
+            setTimeout(() => {
+                if(!resolved) {
+                    resolved = true;
+                    video.removeEventListener('seeked', onSeeked);
+                    resolve();
+                }
+            }, 1000); 
         });
     };
 
     let framesProcessed = 0;
     const startTime = Date.now();
 
-    for (const r of selectedRanges) {
-        for (let f = r.start; f <= r.end; f += step) {
-            if (video.currentTime.toFixed(5) !== (f / fps).toFixed(5)) {
-                 await seekVideo(f / fps);
-            }
-            offscreenCtx.drawImage(video, 0, 0, offscreenCanvas.width, offscreenCanvas.height);
-            const blob = await new Promise(resolve => offscreenCanvas.toBlob(resolve, 'image/jpeg', 0.92));
-            folders[r.name].file(`frame_${f.toString().padStart(6, '0')}.jpg`, blob);
-            
-            framesProcessed++;
-            percentText.textContent = `${Math.round((framesProcessed / totalFramesToExtract) * 100)}%`;
-            progressText.textContent = `${framesProcessed} / ${totalFramesToExtract} klatek`;
-            
-            if (framesProcessed > 5) {
-                const elapsed = Date.now() - startTime;
-                const timePerFrame = elapsed / framesProcessed;
-                const etaSeconds = Math.round((timePerFrame * (totalFramesToExtract - framesProcessed)) / 1000);
-                const minutes = Math.floor(etaSeconds / 60);
-                const seconds = (etaSeconds % 60).toString().padStart(2, '0');
-                etaText.textContent = `Szacowany czas: ${minutes}:${seconds}`;
-            }
+    // --- KROK 3: EKSTRAKCJA UNIKALNYCH KLATEK ---
+    for (const f of uniqueFrames) {
+        if (video.currentTime.toFixed(5) !== (f / fps).toFixed(5)) {
+            await seekVideo(f / fps);
+        }
+        
+        offscreenCtx.drawImage(video, 0, 0, offscreenCanvas.width, offscreenCanvas.height);
+        
+        // Zmniejszono delikatnie jakość (0.90 z 0.92) - mniejsze pliki, lepsza pamięć RAM
+        const blob = await new Promise(resolve => offscreenCanvas.toBlob(resolve, 'image/jpeg', 0.90));
+        
+        // Dystrybucja tej samej klatki do potrzebujących jej ujęć (Bez powielania zużycia RAMu)
+        const targetFolders = frameMap.get(f);
+        for (const folderName of targetFolders) {
+            folders[folderName].file(`frame_${f.toString().padStart(6, '0')}.jpg`, blob);
+        }
+        
+        framesProcessed++;
+        percentText.textContent = `${Math.round((framesProcessed / totalUniqueFrames) * 100)}%`;
+        progressText.textContent = `${framesProcessed} / ${totalUniqueFrames} unikalnych klatek`;
+        
+        if (framesProcessed > 5) {
+            const elapsed = Date.now() - startTime;
+            const timePerFrame = elapsed / framesProcessed;
+            const etaSeconds = Math.round((timePerFrame * (totalUniqueFrames - framesProcessed)) / 1000);
+            const minutes = Math.floor(etaSeconds / 60);
+            const seconds = (etaSeconds % 60).toString().padStart(2, '0');
+            etaText.textContent = `Szacowany czas: ${minutes}:${seconds}`;
         }
     }
 
-    etaText.textContent = "Kompresowanie pliku ZIP...";
-    const content = await zip.generateAsync({ type: "blob" });
+    etaText.textContent = "Kompresowanie pliku ZIP (Optymalizacja RAM)...";
+    
+    // --- KROK 4: OSZCZĘDZANIE PAMIĘCI PRZY GENEROWANIU ZIP ---
+    // Używamy compression "STORE". Pliki JPEG są już skompresowane, więc
+    // ponowna kompresja DEFLATE jedynie marnuje setki megabajtów RAMu.
+    const content = await zip.generateAsync({ 
+        type: "blob",
+        compression: "STORE" 
+    });
+    
     const now = new Date();
     const dateStr = `${now.getFullYear()}-${(now.getMonth()+1).toString().padStart(2,'0')}-${now.getDate().toString().padStart(2,'0')}_${now.getHours().toString().padStart(2,'0')}-${now.getMinutes().toString().padStart(2,'0')}`;
     const link = document.createElement('a');
     link.href = URL.createObjectURL(content);
     link.download = `${originalFileName}_klatki_${dateStr}.zip`;
     link.click();
-    URL.revokeObjectURL(link.href);
+    
+    // Zwolnienie pamięci Blob z RAM-u przeglądarki
+    setTimeout(() => URL.revokeObjectURL(link.href), 5000);
 
     overlay.style.display = 'none';
     btn.disabled = false;
