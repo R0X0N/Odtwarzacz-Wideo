@@ -126,9 +126,12 @@ function initializeVideoState(file, detectedFps, detectedFrames) {
         trimEnd = totalFrames - 1;
         currentFrame = 0;
         
-        resizeTimeline();
-        updateLabels();
-        syncVideoToFrame();
+        // POPRAWKA: Opóźnienie renderowania osi czasu, aby CSS zdążył przydzielić wymiary
+        setTimeout(() => {
+            resizeTimeline();
+            updateLabels();
+            syncVideoToFrame();
+        }, 150);
     };
 }
 
@@ -162,13 +165,11 @@ window.addEventListener('keydown', (e) => {
     if (key === 'i') setInPoint();
     if (key === 'o') setOutPoint();
     
-    // Spacja -> Play/Pause
     if (e.code === 'Space') {
-        e.preventDefault(); // Blokuje przewijanie strony w dół
+        e.preventDefault(); 
         togglePlay();
     }
     
-    // Strzałki do nawigacji po klatkach
     if (e.code === 'ArrowLeft') {
         e.preventDefault();
         skipFrames(-1);
@@ -401,19 +402,23 @@ async function processVideo() {
     if (!video.src) return alert("Najpierw wgraj plik wideo!");
     if (selectedRanges.length === 0) return alert("Dodaj co najmniej jeden zakres!");
 
+    // POPRAWKA: Sprawdzanie czy API jest dostępne w przeglądarce i środowisku
+    if (!window.showDirectoryPicker) {
+        return alert("BŁĄD ZAPISU:\n\nTwoja przeglądarka blokuje bezpośredni zapis do folderu.\n\nPowody:\n1. Otworzyłeś ten plik dwukrotnym kliknięciem (ścieżka file:///). Użyj serwera lokalnego np. 'Live Server' w VS Code (adres http://localhost).\n2. Używasz Firefoksa. Zmień na Chrome, Edge lub Brave.");
+    }
+
     const btn = document.getElementById('processBtn');
     
-    // --- KROK 1: WYBÓR FOLDERU DOCELOWEGO (File System Access API) ---
+    // --- KROK 1: WYBÓR FOLDERU DOCELOWEGO ---
     let baseDirHandle;
     try {
-        // Wywołujemy okno dialogowe wyboru folderu
         baseDirHandle = await window.showDirectoryPicker({
             mode: 'readwrite'
         });
     } catch (err) {
-        if (err.name === 'AbortError') return; // Użytkownik anulował
+        if (err.name === 'AbortError') return; 
         console.error(err);
-        return alert("Twoja przeglądarka nie obsługuje zapisu do folderów (użyj Chrome, Edge lub Brave) lub odmówiono dostępu.");
+        return alert("Odmówiono dostępu do folderu.");
     }
 
     const step = parseInt(document.getElementById('frameStep').value) || 1;
@@ -427,12 +432,10 @@ async function processVideo() {
     btn.textContent = "Zapisywanie...";
 
     // --- KROK 2: DEDUPLIKACJA KLATEK ---
-    // frameMap określa do jakich ujęć (folderów) ma trafić dana unikalna klatka
     const frameMap = new Map();
     selectedRanges.forEach(r => { 
         for (let f = r.start; f <= r.end; f += step) {
             if (!frameMap.has(f)) frameMap.set(f, []);
-            // Jeśli kilka zakresów ma tę samą klatkę, dodajemy nazwę tego folderu do tablicy
             frameMap.get(f).push(r.name); 
         }
     });
@@ -450,16 +453,13 @@ async function processVideo() {
     const dateStr = `${now.getFullYear()}-${(now.getMonth()+1).toString().padStart(2,'0')}-${now.getDate().toString().padStart(2,'0')}_${now.getHours().toString().padStart(2,'0')}-${now.getMinutes().toString().padStart(2,'0')}`;
     const mainFolderName = `${originalFileName}_klatki_${dateStr}`;
     
-    // Tworzenie głównego folderu
     const mainDirHandle = await baseDirHandle.getDirectoryHandle(mainFolderName, { create: true });
 
-    // Tworzenie podfolderów dla poszczególnych ujęć
     const shotFolderHandles = {};
     for (const r of selectedRanges) { 
         shotFolderHandles[r.name] = await mainDirHandle.getDirectoryHandle(r.name, { create: true }); 
     }
 
-    // Tworzenie pliku JSON
     const jsonData = {
         plikWideo: originalFileName,
         dataWygenerowania: new Date().toLocaleString('pl-PL'),
@@ -515,24 +515,20 @@ async function processVideo() {
         
         offscreenCtx.drawImage(video, 0, 0, offscreenCanvas.width, offscreenCanvas.height);
         
-        // Wyciągamy obraz TYLKO RAZ z Canvasa
         const blob = await new Promise(resolve => offscreenCanvas.toBlob(resolve, 'image/jpeg', 0.90));
         
-        // Sprawdzamy, które ujęcia (foldery) potrzebują tej konkretnej klatki
         const targetFolders = frameMap.get(f);
         
-        // Zapisujemy ten sam wygenerowany plik (Blob) do wszystkich folderów docelowych równolegle
         const writePromises = targetFolders.map(async (folderName) => {
             const folderHandle = shotFolderHandles[folderName];
             const fileName = `frame_${f.toString().padStart(6, '0')}.jpg`;
             
             const fileHandle = await folderHandle.getFileHandle(fileName, { create: true });
             const writable = await fileHandle.createWritable();
-            await writable.write(blob); // Fizyczne KOPIOWANIE danych z pamięci na dysk
+            await writable.write(blob); 
             await writable.close();
         });
         
-        // Czekamy aż klatka zapisze się we wszystkich wymaganych podfolderach
         await Promise.all(writePromises);
         
         framesProcessed++;
@@ -551,7 +547,6 @@ async function processVideo() {
 
     etaText.textContent = "Zapisano pomyślnie!";
     
-    // Dodajemy małe opóźnienie, aby użytkownik zobaczył "100%"
     setTimeout(() => {
         overlay.style.display = 'none';
         btn.disabled = false;
