@@ -396,12 +396,26 @@ function updateRangesList() {
     });
 }
 
-// --- GENEROWANIE PACZKI (ZOPTYMALIZOWANE) ---
+// --- GENEROWANIE I BEZPOŚREDNI ZAPIS DO FOLDERÓW (ZOPTYMALIZOWANE) ---
 async function processVideo() {
     if (!video.src) return alert("Najpierw wgraj plik wideo!");
     if (selectedRanges.length === 0) return alert("Dodaj co najmniej jeden zakres!");
 
     const btn = document.getElementById('processBtn');
+    
+    // --- KROK 1: WYBÓR FOLDERU DOCELOWEGO (File System Access API) ---
+    let baseDirHandle;
+    try {
+        // Wywołujemy okno dialogowe wyboru folderu
+        baseDirHandle = await window.showDirectoryPicker({
+            mode: 'readwrite'
+        });
+    } catch (err) {
+        if (err.name === 'AbortError') return; // Użytkownik anulował
+        console.error(err);
+        return alert("Twoja przeglądarka nie obsługuje zapisu do folderów (użyj Chrome, Edge lub Brave) lub odmówiono dostępu.");
+    }
+
     const step = parseInt(document.getElementById('frameStep').value) || 1;
     const overlay = document.getElementById('processingOverlay');
     const percentText = document.getElementById('percentText');
@@ -410,19 +424,19 @@ async function processVideo() {
     
     video.pause();
     btn.disabled = true;
-    btn.textContent = "Przygotowywanie...";
+    btn.textContent = "Zapisywanie...";
 
-    // --- KROK 1: DEDUPLIKACJA KLATEK ---
-    // Tworzymy mapę określającą, do których folderów ma trafić konkretna klatka
+    // --- KROK 2: DEDUPLIKACJA KLATEK ---
+    // frameMap określa do jakich ujęć (folderów) ma trafić dana unikalna klatka
     const frameMap = new Map();
     selectedRanges.forEach(r => { 
         for (let f = r.start; f <= r.end; f += step) {
             if (!frameMap.has(f)) frameMap.set(f, []);
-            frameMap.get(f).push(r.name);
+            // Jeśli kilka zakresów ma tę samą klatkę, dodajemy nazwę tego folderu do tablicy
+            frameMap.get(f).push(r.name); 
         }
     });
 
-    // Sortujemy klatki chronologicznie, żeby przesuwać wideo płynnie do przodu
     const uniqueFrames = Array.from(frameMap.keys()).sort((a, b) => a - b);
     const totalUniqueFrames = uniqueFrames.length;
 
@@ -431,10 +445,21 @@ async function processVideo() {
     progressText.textContent = `0 / ${totalUniqueFrames} unikalnych klatek`;
     etaText.textContent = `Szacowany czas: --:--`;
 
-    const zip = new JSZip();
-    const folders = {};
-    selectedRanges.forEach(r => { folders[r.name] = zip.folder(r.name); });
+    // --- KROK 3: TWORZENIE STRUKTURY FOLDERÓW ---
+    const now = new Date();
+    const dateStr = `${now.getFullYear()}-${(now.getMonth()+1).toString().padStart(2,'0')}-${now.getDate().toString().padStart(2,'0')}_${now.getHours().toString().padStart(2,'0')}-${now.getMinutes().toString().padStart(2,'0')}`;
+    const mainFolderName = `${originalFileName}_klatki_${dateStr}`;
+    
+    // Tworzenie głównego folderu
+    const mainDirHandle = await baseDirHandle.getDirectoryHandle(mainFolderName, { create: true });
 
+    // Tworzenie podfolderów dla poszczególnych ujęć
+    const shotFolderHandles = {};
+    for (const r of selectedRanges) { 
+        shotFolderHandles[r.name] = await mainDirHandle.getDirectoryHandle(r.name, { create: true }); 
+    }
+
+    // Tworzenie pliku JSON
     const jsonData = {
         plikWideo: originalFileName,
         dataWygenerowania: new Date().toLocaleString('pl-PL'),
@@ -447,14 +472,17 @@ async function processVideo() {
             end_time: formatTime(r.end)
         }))
     };
-    zip.file("informacje_o_ujeciach.json", JSON.stringify(jsonData, null, 4));
+    
+    const jsonFileHandle = await mainDirHandle.getFileHandle("informacje_o_ujeciach.json", { create: true });
+    const writableJson = await jsonFileHandle.createWritable();
+    await writableJson.write(JSON.stringify(jsonData, null, 4));
+    await writableJson.close();
 
     const offscreenCanvas = document.createElement('canvas');
     const offscreenCtx = offscreenCanvas.getContext('2d');
     offscreenCanvas.width = video.videoWidth; 
     offscreenCanvas.height = video.videoHeight;
 
-    // --- KROK 2: BEZPIECZNE PRZEWIJANIE (Nawet zminimalizowana przeglądarka) ---
     const seekVideo = (time) => {
         return new Promise(resolve => {
             let resolved = false;
@@ -466,8 +494,6 @@ async function processVideo() {
             };
             video.addEventListener('seeked', onSeeked);
             video.currentTime = time;
-
-            // Timeout w razie gdyby przeglądarka wstrzymała renderowanie z powodu minimalizacji
             setTimeout(() => {
                 if(!resolved) {
                     resolved = true;
@@ -481,7 +507,7 @@ async function processVideo() {
     let framesProcessed = 0;
     const startTime = Date.now();
 
-    // --- KROK 3: EKSTRAKCJA UNIKALNYCH KLATEK ---
+    // --- KROK 4: EKSTRAKCJA I BEZPOŚREDNI ZAPIS ---
     for (const f of uniqueFrames) {
         if (video.currentTime.toFixed(5) !== (f / fps).toFixed(5)) {
             await seekVideo(f / fps);
@@ -489,14 +515,25 @@ async function processVideo() {
         
         offscreenCtx.drawImage(video, 0, 0, offscreenCanvas.width, offscreenCanvas.height);
         
-        // Zmniejszono delikatnie jakość (0.90 z 0.92) - mniejsze pliki, lepsza pamięć RAM
+        // Wyciągamy obraz TYLKO RAZ z Canvasa
         const blob = await new Promise(resolve => offscreenCanvas.toBlob(resolve, 'image/jpeg', 0.90));
         
-        // Dystrybucja tej samej klatki do potrzebujących jej ujęć (Bez powielania zużycia RAMu)
+        // Sprawdzamy, które ujęcia (foldery) potrzebują tej konkretnej klatki
         const targetFolders = frameMap.get(f);
-        for (const folderName of targetFolders) {
-            folders[folderName].file(`frame_${f.toString().padStart(6, '0')}.jpg`, blob);
-        }
+        
+        // Zapisujemy ten sam wygenerowany plik (Blob) do wszystkich folderów docelowych równolegle
+        const writePromises = targetFolders.map(async (folderName) => {
+            const folderHandle = shotFolderHandles[folderName];
+            const fileName = `frame_${f.toString().padStart(6, '0')}.jpg`;
+            
+            const fileHandle = await folderHandle.getFileHandle(fileName, { create: true });
+            const writable = await fileHandle.createWritable();
+            await writable.write(blob); // Fizyczne KOPIOWANIE danych z pamięci na dysk
+            await writable.close();
+        });
+        
+        // Czekamy aż klatka zapisze się we wszystkich wymaganych podfolderach
+        await Promise.all(writePromises);
         
         framesProcessed++;
         percentText.textContent = `${Math.round((framesProcessed / totalUniqueFrames) * 100)}%`;
@@ -512,27 +549,12 @@ async function processVideo() {
         }
     }
 
-    etaText.textContent = "Kompresowanie pliku ZIP (Optymalizacja RAM)...";
+    etaText.textContent = "Zapisano pomyślnie!";
     
-    // --- KROK 4: OSZCZĘDZANIE PAMIĘCI PRZY GENEROWANIU ZIP ---
-    // Używamy compression "STORE". Pliki JPEG są już skompresowane, więc
-    // ponowna kompresja DEFLATE jedynie marnuje setki megabajtów RAMu.
-    const content = await zip.generateAsync({ 
-        type: "blob",
-        compression: "STORE" 
-    });
-    
-    const now = new Date();
-    const dateStr = `${now.getFullYear()}-${(now.getMonth()+1).toString().padStart(2,'0')}-${now.getDate().toString().padStart(2,'0')}_${now.getHours().toString().padStart(2,'0')}-${now.getMinutes().toString().padStart(2,'0')}`;
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(content);
-    link.download = `${originalFileName}_klatki_${dateStr}.zip`;
-    link.click();
-    
-    // Zwolnienie pamięci Blob z RAM-u przeglądarki
-    setTimeout(() => URL.revokeObjectURL(link.href), 5000);
-
-    overlay.style.display = 'none';
-    btn.disabled = false;
-    btn.textContent = "Przetwórz i pobierz (.zip)";
+    // Dodajemy małe opóźnienie, aby użytkownik zobaczył "100%"
+    setTimeout(() => {
+        overlay.style.display = 'none';
+        btn.disabled = false;
+        btn.textContent = "Wybierz folder i Zapisz (Zoptymalizowane)";
+    }, 1500);
 }
