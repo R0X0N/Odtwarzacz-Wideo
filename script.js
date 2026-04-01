@@ -416,9 +416,9 @@ async function processVideo() {
             mode: 'readwrite'
         });
     } catch (err) {
-        if (err.name === 'AbortError') return; 
+        if (err.name === 'AbortError') return; // Użytkownik zamknął okno
         console.error(err);
-        return alert("Odmówiono dostępu do folderu.");
+        return alert("BŁĄD ZAPISU:\n\nPrzeglądarka ze względów bezpieczeństwa blokuje zapis w głównych folderach systemowych (np. bezpośrednio na dysku C:\\ lub w głównym folderze Użytkownika).\n\nROZWIĄZANIE:\nStwórz NOWY, PUSTY FOLDER (np. na Pulpicie), wejdź do niego i dopiero wtedy kliknij 'Wybierz folder'.");
     }
 
     const step = parseInt(document.getElementById('frameStep').value) || 1;
