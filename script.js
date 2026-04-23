@@ -44,10 +44,26 @@ uploader.addEventListener('change', function(e) {
     cancelEdit();
     video.pause();
 
-    fileInfo.textContent = "Analizowanie pliku (MP4Box)...";
-    fileInfo.style.color = "#FDD835";
-    
-    analyzeWithMP4Box(file);
+    // Sprawdzanie czy to plik MKV
+    const isMKV = file.name.toLowerCase().endsWith('.mkv') || file.type === 'video/x-matroska';
+
+    if (isMKV) {
+        // MKV - Przechodzimy w tryb wbudowany przeglądarki
+        fileInfo.textContent = "Analizowanie MKV...";
+        fileInfo.style.color = "#FDD835";
+        
+        // Pytamy użytkownika o FPS, ponieważ z pliku MKV nie da się tego łatwo wyciągnąć bez FFmpeg
+        let userFpsInput = prompt("Wgrywasz plik MKV.\nPrzeglądarka nie potrafi automatycznie odczytać ilości klatek na sekundę (FPS) z tego formatu.\n\nPodaj wartość FPS dla tego filmu (np. 24, 25, 30, 60):", "30");
+        let parsedFps = parseFloat(userFpsInput);
+        if (isNaN(parsedFps) || parsedFps <= 0) parsedFps = 30.0; // Domyślnie 30 jeśli ktoś wpisze głupoty
+
+        fallbackInit(file, "Pominięto MP4Box dla pliku MKV", parsedFps);
+    } else {
+        // MP4 - Standardowa, dokładna ścieżka
+        fileInfo.textContent = "Analizowanie pliku (MP4Box)...";
+        fileInfo.style.color = "#FDD835";
+        analyzeWithMP4Box(file);
+    }
 });
 
 function analyzeWithMP4Box(file) {
@@ -62,13 +78,13 @@ function analyzeWithMP4Box(file) {
             console.log(`[MP4Box] Wykryto: ${detectedFps.toFixed(2)} FPS, ${frameCount} klatek.`);
             initializeVideoState(file, detectedFps, frameCount);
         } else {
-            fallbackInit(file, "Brak ścieżki wideo w metadanych");
+            fallbackInit(file, "Brak ścieżki wideo w metadanych MP4", 30.0);
         }
     };
 
     mp4boxfile.onError = function(e) {
         console.error("MP4Box Error:", e);
-        fallbackInit(file, "Błąd parsowania MP4Box");
+        fallbackInit(file, "Błąd parsowania MP4Box", 30.0);
     };
 
     const reader = new FileReader();
@@ -92,14 +108,28 @@ function analyzeWithMP4Box(file) {
     reader.readAsArrayBuffer(slice);
 }
 
-function fallbackInit(file, reason) {
-    console.warn(`[FALLBACK] Powód: ${reason}`);
-    fileInfo.textContent = "Analizuję FPS (tryb awaryjny)...";
+function fallbackInit(file, reason, assumedFps) {
+    console.warn(`[FALLBACK] Powód: ${reason}. Założono: ${assumedFps} FPS`);
+    
     const tempVideo = document.createElement('video');
     tempVideo.src = URL.createObjectURL(file);
+    
     tempVideo.onloadedmetadata = () => {
-        const assumedFps = 30.0; 
-        initializeVideoState(file, assumedFps, Math.round(tempVideo.duration * assumedFps));
+        const duration = tempVideo.duration;
+        if (!isFinite(duration)) {
+            fileInfo.textContent = "Błąd: Przeglądarka nie może ustalić długości pliku MKV.";
+            fileInfo.style.color = "#E53935";
+            URL.revokeObjectURL(tempVideo.src);
+            return;
+        }
+        
+        initializeVideoState(file, assumedFps, Math.round(duration * assumedFps));
+        URL.revokeObjectURL(tempVideo.src);
+    };
+
+    tempVideo.onerror = () => {
+        fileInfo.textContent = "Błąd: Przeglądarka nie obsługuje kodeka z tego pliku MKV (spróbuj H.264).";
+        fileInfo.style.color = "#E53935";
         URL.revokeObjectURL(tempVideo.src);
     };
 }
@@ -397,26 +427,24 @@ function updateRangesList() {
     });
 }
 
-// --- GENEROWANIE I BEZPOŚREDNI ZAPIS DO FOLDERÓW (ZOPTYMALIZOWANE) ---
+// --- GENEROWANIE I BEZPOŚREDNI ZAPIS DO FOLDERÓW ---
 async function processVideo() {
     if (!video.src) return alert("Najpierw wgraj plik wideo!");
     if (selectedRanges.length === 0) return alert("Dodaj co najmniej jeden zakres!");
 
-    // POPRAWKA: Sprawdzanie czy API jest dostępne w przeglądarce i środowisku
     if (!window.showDirectoryPicker) {
         return alert("BŁĄD ZAPISU:\n\nTwoja przeglądarka blokuje bezpośredni zapis do folderu.\n\nPowody:\n1. Otworzyłeś ten plik dwukrotnym kliknięciem (ścieżka file:///). Użyj serwera lokalnego np. 'Live Server' w VS Code (adres http://localhost).\n2. Używasz Firefoksa. Zmień na Chrome, Edge lub Brave.");
     }
 
     const btn = document.getElementById('processBtn');
     
-    // --- KROK 1: WYBÓR FOLDERU DOCELOWEGO ---
     let baseDirHandle;
     try {
         baseDirHandle = await window.showDirectoryPicker({
             mode: 'readwrite'
         });
     } catch (err) {
-        if (err.name === 'AbortError') return; // Użytkownik zamknął okno
+        if (err.name === 'AbortError') return; 
         console.error(err);
         return alert("BŁĄD ZAPISU:\n\nPrzeglądarka ze względów bezpieczeństwa blokuje zapis w głównych folderach systemowych (np. bezpośrednio na dysku C:\\ lub w głównym folderze Użytkownika).\n\nROZWIĄZANIE:\nStwórz NOWY, PUSTY FOLDER (np. na Pulpicie), wejdź do niego i dopiero wtedy kliknij 'Wybierz folder'.");
     }
@@ -431,7 +459,6 @@ async function processVideo() {
     btn.disabled = true;
     btn.textContent = "Zapisywanie...";
 
-    // --- KROK 2: DEDUPLIKACJA KLATEK ---
     const frameMap = new Map();
     selectedRanges.forEach(r => { 
         for (let f = r.start; f <= r.end; f += step) {
@@ -448,7 +475,6 @@ async function processVideo() {
     progressText.textContent = `0 / ${totalUniqueFrames} unikalnych klatek`;
     etaText.textContent = `Szacowany czas: --:--`;
 
-    // --- KROK 3: TWORZENIE STRUKTURY FOLDERÓW ---
     const now = new Date();
     const dateStr = `${now.getFullYear()}-${(now.getMonth()+1).toString().padStart(2,'0')}-${now.getDate().toString().padStart(2,'0')}_${now.getHours().toString().padStart(2,'0')}-${now.getMinutes().toString().padStart(2,'0')}`;
     const mainFolderName = `${originalFileName}_klatki_${dateStr}`;
@@ -507,7 +533,6 @@ async function processVideo() {
     let framesProcessed = 0;
     const startTime = Date.now();
 
-    // --- KROK 4: EKSTRAKCJA I BEZPOŚREDNI ZAPIS ---
     for (const f of uniqueFrames) {
         if (video.currentTime.toFixed(5) !== (f / fps).toFixed(5)) {
             await seekVideo(f / fps);
