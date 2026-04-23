@@ -44,22 +44,21 @@ uploader.addEventListener('change', function(e) {
     cancelEdit();
     video.pause();
 
-    // Sprawdzanie czy to plik MKV
+    // SPRAWDZENIE FORMATU PLIKU (MP4 vs MKV)
     const isMKV = file.name.toLowerCase().endsWith('.mkv') || file.type === 'video/x-matroska';
 
     if (isMKV) {
-        // MKV - Przechodzimy w tryb wbudowany przeglądarki
         fileInfo.textContent = "Analizowanie MKV...";
         fileInfo.style.color = "#FDD835";
         
-        // Pytamy użytkownika o FPS, ponieważ z pliku MKV nie da się tego łatwo wyciągnąć bez FFmpeg
+        // Pytamy użytkownika o FPS, bo z MKV przeglądarka tego natywnie nie wyciągnie
         let userFpsInput = prompt("Wgrywasz plik MKV.\nPrzeglądarka nie potrafi automatycznie odczytać ilości klatek na sekundę (FPS) z tego formatu.\n\nPodaj wartość FPS dla tego filmu (np. 24, 25, 30, 60):", "30");
         let parsedFps = parseFloat(userFpsInput);
-        if (isNaN(parsedFps) || parsedFps <= 0) parsedFps = 30.0; // Domyślnie 30 jeśli ktoś wpisze głupoty
+        if (isNaN(parsedFps) || parsedFps <= 0) parsedFps = 30.0; // Domyślnie 30 
 
         fallbackInit(file, "Pominięto MP4Box dla pliku MKV", parsedFps);
     } else {
-        // MP4 - Standardowa, dokładna ścieżka
+        // Dla formatu MP4 używamy standardowo dokładnego MP4Box
         fileInfo.textContent = "Analizowanie pliku (MP4Box)...";
         fileInfo.style.color = "#FDD835";
         analyzeWithMP4Box(file);
@@ -128,7 +127,7 @@ function fallbackInit(file, reason, assumedFps) {
     };
 
     tempVideo.onerror = () => {
-        fileInfo.textContent = "Błąd: Przeglądarka nie obsługuje kodeka z tego pliku MKV (spróbuj H.264).";
+        fileInfo.textContent = "Błąd: Przeglądarka nie obsługuje kodeka w tym pliku MKV (wymagane H.264).";
         fileInfo.style.color = "#E53935";
         URL.revokeObjectURL(tempVideo.src);
     };
@@ -156,7 +155,6 @@ function initializeVideoState(file, detectedFps, detectedFrames) {
         trimEnd = totalFrames - 1;
         currentFrame = 0;
         
-        // POPRAWKA: Opóźnienie renderowania osi czasu, aby CSS zdążył przydzielić wymiary
         setTimeout(() => {
             resizeTimeline();
             updateLabels();
@@ -427,7 +425,7 @@ function updateRangesList() {
     });
 }
 
-// --- GENEROWANIE I BEZPOŚREDNI ZAPIS DO FOLDERÓW ---
+// --- GENEROWANIE I BEZPOŚREDNI ZAPIS DO FOLDERÓW (ZOPTYMALIZOWANE) ---
 async function processVideo() {
     if (!video.src) return alert("Najpierw wgraj plik wideo!");
     if (selectedRanges.length === 0) return alert("Dodaj co najmniej jeden zakres!");
@@ -438,6 +436,7 @@ async function processVideo() {
 
     const btn = document.getElementById('processBtn');
     
+    // --- KROK 1: WYBÓR FOLDERU DOCELOWEGO ---
     let baseDirHandle;
     try {
         baseDirHandle = await window.showDirectoryPicker({
@@ -459,6 +458,7 @@ async function processVideo() {
     btn.disabled = true;
     btn.textContent = "Zapisywanie...";
 
+    // --- KROK 2: DEDUPLIKACJA KLATEK ---
     const frameMap = new Map();
     selectedRanges.forEach(r => { 
         for (let f = r.start; f <= r.end; f += step) {
@@ -475,6 +475,7 @@ async function processVideo() {
     progressText.textContent = `0 / ${totalUniqueFrames} unikalnych klatek`;
     etaText.textContent = `Szacowany czas: --:--`;
 
+    // --- KROK 3: TWORZENIE STRUKTURY FOLDERÓW ---
     const now = new Date();
     const dateStr = `${now.getFullYear()}-${(now.getMonth()+1).toString().padStart(2,'0')}-${now.getDate().toString().padStart(2,'0')}_${now.getHours().toString().padStart(2,'0')}-${now.getMinutes().toString().padStart(2,'0')}`;
     const mainFolderName = `${originalFileName}_klatki_${dateStr}`;
@@ -533,6 +534,7 @@ async function processVideo() {
     let framesProcessed = 0;
     const startTime = Date.now();
 
+    // --- KROK 4: EKSTRAKCJA I BEZPOŚREDNI ZAPIS ---
     for (const f of uniqueFrames) {
         if (video.currentTime.toFixed(5) !== (f / fps).toFixed(5)) {
             await seekVideo(f / fps);
@@ -575,6 +577,6 @@ async function processVideo() {
     setTimeout(() => {
         overlay.style.display = 'none';
         btn.disabled = false;
-        btn.textContent = "Wybierz folder i Zapisz (Zoptymalizowane)";
+        btn.textContent = "Wybierz folder i Zapisz";
     }, 1500);
 }
